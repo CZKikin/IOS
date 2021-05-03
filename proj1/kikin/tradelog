@@ -1,0 +1,164 @@
+#!/bin/bash
+export LC_ALL=C
+export POSIXLY_CORRECT=yes
+printHelp(){
+    echo 'Usage: ./tradelog [-h|--help] [filtr] [příkaz] [LOG [LOG2 [...]]'
+    echo '---'
+    echo 'Commands:'
+    echo 'list-tick – výpis seznamu vyskytujících se burzovních symbolů, tzv. “tickerů”.'
+    echo 'profit – výpis celkového zisku z uzavřených pozic.'
+    echo 'pos – výpis hodnot aktuálně držených pozic seřazených sestupně dle hodnoty.'
+    echo 'last-price – výpis poslední známé ceny pro každý ticker.'
+    echo 'hist-ord – výpis histogramu počtu transakcí dle tickeru.'
+    echo 'graph-pos – výpis grafu hodnot držených pozic dle tickeru.'
+    echo '---'
+    echo 'Filtry:'
+    echo '-a DATETIME – after: jsou uvažovány pouze záznamy PO tomto datu (bez tohoto data). DATETIME je formátu "YYYY-MM-DD HH:MM:SS".'
+    echo '-b DATETIME – before: jsou uvažovány pouze záznamy PŘED tímto datem (bez tohoto data).'
+    echo '-t TICKER – jsou uvažovány pouze záznamy odpovídající danému tickeru. Při více výskytech přepínače se bere množina všech uvedených tickerů.'
+    echo '-w WIDTH – u výpisu grafů nastavuje jejich šířku, tedy délku nejdelšího řádku na WIDTH. Tedy, WIDTH musí být kladné celé číslo. Více výskytů přepínače je chybné spuštění.'
+    echo '-h a --help vypíšou nápovědu s krátkým popisem každého příkazu a přepínače.'
+    exit 0
+}
+
+printDebugInfo(){
+echo "tickets=${tickets[@]}"
+echo "graphWidth=$graphWidth"
+echo "datetimebefore=$datetimebefore"
+echo "datetimeafter=$datetimeafter"
+echo "cmd=$cmd"
+echo "files=${files[@]}"
+}
+
+#create a funtion to open gz files
+
+[[ $# -eq 0 ]] && printHelp
+
+files=()
+gzFiles=""
+tickets=()
+datetimebefore="randomPatternToEnable&&"
+datetimeafter=""
+graphWidth=-1
+while [[ $# -gt 0 ]]
+do
+    key="$1"
+    
+    case $key in
+        -h|--help)
+            printHelp
+            ;;
+    
+        -a)
+            datetimeafter="$2"
+            shift # past argument
+            shift # past value
+            ;;
+    
+        -b)
+            datetimebefore="$2"
+            shift # past argument
+            shift # past value
+            ;;
+    
+        -t)
+            tickets+=("$2")
+            shift # past argument
+            shift # past value
+            ;;
+    
+        -w)
+            [ $2 -gt 0 ] && [ -z $graphWidthSet ] && graphWidth=$2 || \
+                { echo "Graph width can be set only once!"; exit 1; }
+            graphWidthSet=1
+            shift # past argument
+            shift # past value
+            ;;
+    
+        *) # unknown option = file(s)
+            availableCmds=("list-tick" "profit" "pos" "last-price" "hist-ord" "graph-pos")
+            if printf '%s\n' "${availableCmds[@]}" | grep -q -P "^$1$"; then
+                cmd=$1
+                shift
+            fi
+            while [ $# -gt 0 ]
+            do
+                [[ "$1" =~ ".gz" ]] && gzFiles+="`gunzip --stdout $1`" || files+=("$1")
+                shift
+            done
+            ;;
+    esac
+done
+
+[ -z $DEBUG ] || printDebugInfo
+[ "$tickets" != "" ] && grepParams=`echo ${tickets[@]} | sed 's/[^ ][^ ]*/\\\<&\\\>/g'  | sed 's/ /\|/g'` ||grepParams="$"
+
+output=""
+[ ${#files[@]} -ne 0 ] && output+=`cat ${files[@]}`
+output+=`echo "$gzFiles"`
+output=`echo "$output" | awk -v pre="$datetimebefore" -v aft="$datetimeafter" -F ";" '{if ($1<pre && $1>aft) print}' | grep -E "${grepParams}"`
+
+case $cmd in
+    list-tick)
+        output=`echo "$output" | awk -F ";" '{print $2}' | sort -u`
+        ;;
+    profit)
+        output=`echo "$output" | awk -F ';' '{if ($3 == "sell") {sellSum += $4*$6;} else {buySum += $4*$6;}} END {printf "%.02f", sellSum - buySum}'`
+        ;;
+    pos)
+        ticks=`echo "$output" | awk -F ";" '{print $2}' | sort -u`
+        cacheall=()
+        for tick in ${ticks[@]}
+        do
+           cache=`echo "$output" | grep "\<$tick\>" | awk -F ";" '{tick=$2; if ($3 == "sell") {sellSum += $6;} else {buySum += $6;} currentValue=$4} END {printf "%s %.02f", tick, (buySum - sellSum)*currentValue}'`
+           cacheall+=("$cache")
+        done
+
+        m=0
+        for x in ${cacheall[@]}; do [ ${#x} -gt $m ] && m=${#x}; done
+
+        printf -v output "%-10s: %${m}s\n" ${cacheall[@]}
+        output=`echo "$output" | sort -t ":" -k2 -g -r`
+        ;;
+    last-price)
+        ticks=`echo "$output" | awk -F ";" '{print $2}' | sort -u`
+        cacheall=()
+        for tick in ${ticks[@]}
+        do
+           cache=`echo "$output" | grep "\<$tick\>" | awk -F ";" '{tick=$2; value=$4} END {printf "%s %f", tick, value}'`
+           cacheall+=("$cache")
+        done
+        printf -v output "%-10s: %${m}s\n" ${cacheall[@]}
+        output=`echo "$output" | sort -t ":" -k2 -g -r`
+        ;;
+
+    hist-ord)
+        [ $graphWidth -eq -1 ] && graphWidth=1
+        ticks=`echo "$output" | awk -F ";" '{print $2}' | sort -u`
+        cacheall=()
+        for tick in ${ticks[@]}
+        do
+           cache=`echo "$output" | grep "\<$tick\>" | wc -l | awk -v tick="$tick" -v graphWidth="$graphWidth" '{printf "%s %d", tick, $1/graphWidth}'`
+           cacheall+=("$cache")
+        done
+        printf -v output "%-10s:%s\n" ${cacheall[@]}
+        output=`echo "$output" | awk -F ":" '{if($1=$1){printf "%s:", $1; for(c=0;c<$2;c++){ if(c==0){printf " "} printf "#";} printf"\n" }}' ` #that if $1=$1 deletes the new line that printf from some reason adds..
+        ;;
+    graph-pos)
+        [ $graphWidth -eq -1 ] && graphWidth=1000
+        ticks=`echo "$output" | awk -F ";" '{print $2}' | sort -u`
+        cacheall=()
+        for tick in ${ticks[@]}
+        do
+           cache=`echo "$output" | grep "\<$tick\>" | awk -F ";" '{tick=$2; if ($3 == "sell") {sellSum += $6;} else {buySum += $6;} currentValue=$4} END {printf "%s %d", tick, (buySum - sellSum)*currentValue}'`
+           cacheall+=("$cache")
+        done
+        printf -v output "%-10s:%s\n" ${cacheall[@]}
+        maxValue=`echo "$output" | awk -v max=0 -F ":" 'function abs(x){return (x < 0) ? -x : x;} {if(abs($2)>max){max=abs($2)}} END {print max}'`
+        output=`echo "$output" | awk -F ":" -v graphWidth="$graphWidth" -v maxValue="$maxValue" '{printf "%s:%d\n", $1, ($2/maxValue)*graphWidth}'`
+        output=`echo "$output" | awk -F ":" '{if($1=$1){printf "%s:", $1; if($2>0){printf " "; for(c=0;c<$2;c++){ printf "#";}} if($2<0){printf " "; for (c=0;c>$2;c--){ printf "!";}} printf"\n" }}'`
+        ;;
+esac
+
+#Final echo
+echo "$output"
