@@ -104,7 +104,7 @@ synchronizaci.
 synchronizace.
 - Pracujte s procesy, ne s vlákny.
 
-### Hlavní proces
+### Hlavní proces
 1. Hlavní proces vytváří ihned po spuštění jeden proces Santa, NE procesů skřítků a NR procesů sobů.
 2. Poté čeká na ukončení všech procesů, které aplikace vytváří. Jakmile jsou tyto procesy
 ukončeny, ukončí se i hlavní proces s kódem (exit code) 0.
